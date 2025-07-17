@@ -84,7 +84,9 @@ requires:
     receive-ca-cert:
         interface: certificate_transfer
         optional: true
-
+    temporal-worker-consumer:
+        interface: temporal-worker-consumer
+        limit: 1
 provides:
     metrics-endpoint:
         interface: prometheus_scrape
@@ -98,21 +100,8 @@ config:
         log-level:
             description: |
                 Configures the log level of WSGI HTTP Server.
-
                 Acceptable values are: "info", "debug", "warning", "error" and "critical"
             default: "info"
-            type: string
-        temporal-server-address:
-            description: The host:port for the temporal server
-            default: localhost:7233
-            type: string
-        temporal-namespace:
-            description: The namespace to use for running Temporal workflows
-            default: msm-namespace
-            type: string
-        temporal-task-queue:
-            description: The task queue for Temporal workers to look for jobs in
-            default: msm-queue
             type: string
         temporal-tls-root-cas:
             description: Root certificate authority (CA) certificates for TLS communication.

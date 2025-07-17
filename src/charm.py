@@ -65,6 +65,10 @@ class S3IntegrationNotReadyError(Exception):
     """Signals that the s3 integration is not ready."""
 
 
+class TemporalRelationNotReadyError(Exception):
+    """Signals that the Temporal worker relation is not ready."""
+
+
 @trace_charm(
     tracing_endpoint="charm_tracing_endpoint",
     extra_types=[
@@ -156,6 +160,14 @@ class MsmOperatorCharm(ops.CharmBase):
             self.s3_requirer.on.credentials_changed, self._update_layer_and_restart
         )
 
+        # Temporal
+        self.framework.observe(
+            self.on.worker_consumer_relation_changed, self._update_layer_and_restart
+        )
+        self.framework.observe(
+            self.on.worker_consumer_relation_joined, self._update_layer_and_restart
+        )
+
     def _update_layer_and_restart(self, event):
         """Handle changed configuration."""
         self.unit.status = ops.MaintenanceStatus("Assembling pod spec")
@@ -184,6 +196,9 @@ class MsmOperatorCharm(ops.CharmBase):
             return
         except S3IntegrationNotReadyError:
             self.unit.status = ops.WaitingStatus("Waiting for s3 integration")
+            return
+        except TemporalRelationNotReadyError:
+            self.unit.status = ops.WaitingStatus("Waiting for worker-consumer relation")
             return
 
         # Handle Loki push API endpoints
@@ -352,6 +367,7 @@ class MsmOperatorCharm(ops.CharmBase):
         """
         db_data = self._fetch_postgres_relation_data()
         s3_data = self._fetch_s3_connection_info()
+        temporal_data = self._fetch_temporal_relation_data()
         env = {
             "UVICORN_LOG_LEVEL": self.model.config["log-level"],
             "MSM_DB_HOST": db_data.get("db_host", None),
@@ -365,9 +381,9 @@ class MsmOperatorCharm(ops.CharmBase):
             "MSM_S3_ENDPOINT": s3_data.get("endpoint", None),
             "MSM_S3_BUCKET": s3_data.get("bucket", None),
             "MSM_S3_PATH": s3_data.get("path", None),
-            "MSM_TEMPORAL_SERVER_ADDRESS": self.model.config["temporal-server-address"],
-            "MSM_TEMPORAL_NAMESPACE": self.model.config["temporal-namespace"],
-            "MSM_TEMPORAL_TASK_QUEUE": self.model.config["temporal-task-queue"],
+            "MSM_TEMPORAL_SERVER_ADDRESS": temporal_data["host"],
+            "MSM_TEMPORAL_NAMESPACE": temporal_data["namespace"],
+            "MSM_TEMPORAL_TASK_QUEUE": temporal_data["queue"],
             "MSM_TEMPORAL_TLS_ROOT_CAS": self.model.config["temporal-tls-root-cas"],
         }
         return env
@@ -450,6 +466,15 @@ class MsmOperatorCharm(ops.CharmBase):
                 )
                 self.container.push(cert_filename, cert, make_dirs=True)
         self.container.exec(["update-ca-certificates", "--fresh"]).wait()
+
+    def _fetch_temporal_relation_data(self) -> dict:
+        if relation := self.model.get_relation("worker-consumer"):
+            return {
+                "host": relation.data[relation.app]["host"],
+                "namespace": relation.data[relation.app]["namespace"],
+                "queue": relation.data[relation.app]["queue"],
+            }
+        raise TemporalRelationNotReadyError()
 
     def _create_msm_user(
         self, username: str, password: str, email: str, fullname: str | None = None
