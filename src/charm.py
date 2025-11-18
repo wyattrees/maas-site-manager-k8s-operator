@@ -37,6 +37,8 @@ from ops.pebble import CheckStatus
 from requests.exceptions import RequestException
 
 from api import SiteManagerClient
+from host_info import TemporalHostInfoRequirer
+from worker_consumer import TemporalWorkerConsumerRequirer
 
 # Log messages can be retrieved using juju debug-log
 logger = logging.getLogger(__name__)
@@ -63,6 +65,14 @@ class OperatorUserError(Exception):
 
 class S3IntegrationNotReadyError(Exception):
     """Signals that the s3 integration is not ready."""
+
+
+class HostInfoIntegrationNotReadyError(Exception):
+    """Signals that the temporal-host-info integration is not ready."""
+
+
+class WorkerConsumerIntegrationNotReadyError(Exception):
+    """Signals that the temporal-worker-consumer integration is not ready."""
 
 
 @trace_charm(
@@ -147,6 +157,16 @@ class MsmOperatorCharm(ops.CharmBase):
             self.certificate_transfer.on.certificates_removed, self._on_cert_transfer_removed
         )
 
+        # Temporal
+        self.host_info = TemporalHostInfoRequirer(self)
+        self.worker_consumer = TemporalWorkerConsumerRequirer(self)
+        self.framework.observe(
+            self.host_info.on.temporal_host_info_available, self._update_layer_and_restart
+        )
+        self.framework.observe(
+            self.worker_consumer.on.worker_consumer_available, self._update_layer_and_restart
+        )
+
         # Charm actions
         self.framework.observe(self.on.create_admin_action, self._on_create_admin_action)
 
@@ -184,6 +204,14 @@ class MsmOperatorCharm(ops.CharmBase):
             return
         except S3IntegrationNotReadyError:
             self.unit.status = ops.WaitingStatus("Waiting for s3 integration")
+            return
+        except HostInfoIntegrationNotReadyError:
+            self.unit.status = ops.WaitingStatus("Waiting for temporal-host-info integration")
+            return
+        except WorkerConsumerIntegrationNotReadyError:
+            self.unit.status = ops.WaitingStatus(
+                "Waiting for temporal-worker-consumer integration"
+            )
             return
 
         # Handle Loki push API endpoints
@@ -352,6 +380,7 @@ class MsmOperatorCharm(ops.CharmBase):
         """
         db_data = self._fetch_postgres_relation_data()
         s3_data = self._fetch_s3_connection_info()
+        temporal_data = self._fetch_temporal_relation_data()
         env = {
             "UVICORN_LOG_LEVEL": self.model.config["log-level"],
             "MSM_DB_HOST": db_data.get("db_host", None),
@@ -365,9 +394,9 @@ class MsmOperatorCharm(ops.CharmBase):
             "MSM_S3_ENDPOINT": s3_data.get("endpoint", None),
             "MSM_S3_BUCKET": s3_data.get("bucket", None),
             "MSM_S3_PATH": s3_data.get("path", None),
-            "MSM_TEMPORAL_SERVER_ADDRESS": self.model.config["temporal-server-address"],
-            "MSM_TEMPORAL_NAMESPACE": self.model.config["temporal-namespace"],
-            "MSM_TEMPORAL_TASK_QUEUE": self.model.config["temporal-task-queue"],
+            "MSM_TEMPORAL_SERVER_ADDRESS": temporal_data.get("host", None),
+            "MSM_TEMPORAL_NAMESPACE": temporal_data.get("namespace", None),
+            "MSM_TEMPORAL_TASK_QUEUE": temporal_data.get("queue", None),
             "MSM_TEMPORAL_TLS_ROOT_CAS": self.model.config["temporal-tls-root-cas"],
         }
         return env
@@ -376,6 +405,22 @@ class MsmOperatorCharm(ops.CharmBase):
         """Fetch the version from the running workload using the API."""
         resp = requests.get(f"http://localhost:{SERVICE_PORT}/version", timeout=10)
         return resp.json()["version"]
+
+    def _fetch_temporal_relation_data(self) -> dict:
+        """Fetch temporal relation data."""
+        namespace = self.worker_consumer.namespace
+        queue = self.worker_consumer.queue
+        if namespace is None or queue is None:
+            raise WorkerConsumerIntegrationNotReadyError()
+        hostname = self.host_info.host
+        port = self.host_info.port
+        if hostname is None or port is None:
+            raise HostInfoIntegrationNotReadyError()
+        return {
+            "namespace": namespace,
+            "queue": queue,
+            "host": f"{hostname}:{port}",
+        }
 
     def _fetch_postgres_relation_data(self) -> dict:
         """Fetch postgres relation data.
