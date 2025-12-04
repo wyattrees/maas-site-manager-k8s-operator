@@ -28,6 +28,8 @@ from charms.maas_site_manager_k8s.v0 import enroll
 from charms.prometheus_k8s.v0.prometheus_scrape import MetricsEndpointProvider
 from charms.tempo_coordinator_k8s.v0.charm_tracing import trace_charm
 from charms.tempo_coordinator_k8s.v0.tracing import TracingEndpointRequirer, charm_tracing_config
+from charms.temporal_k8s.v0.temporal_host_info import TemporalHostInfoRequirer
+from charms.temporal_worker_k8s.v0.temporal_worker_consumer import TemporalWorkerConsumerRequirer
 from charms.traefik_k8s.v2.ingress import (
     IngressPerAppReadyEvent,
     IngressPerAppRequirer,
@@ -66,7 +68,11 @@ class S3IntegrationNotReadyError(Exception):
 
 
 class TemporalRelationNotReadyError(Exception):
-    """Signals that the Temporal worker relation is not ready."""
+    """Signals that a Temporal relation is not ready."""
+
+    def __init__(self, relation_name: str):
+        super().__init__()
+        self.relation_name = relation_name
 
 
 @trace_charm(
@@ -161,11 +167,14 @@ class MsmOperatorCharm(ops.CharmBase):
         )
 
         # Temporal
+        self.host_info = TemporalHostInfoRequirer(self)
+        self.worker_consumer = TemporalWorkerConsumerRequirer(self)
         self.framework.observe(
-            self.on.worker_consumer_relation_changed, self._update_layer_and_restart
+            self.host_info.on.temporal_host_info_available, self._update_layer_and_restart
         )
         self.framework.observe(
-            self.on.worker_consumer_relation_joined, self._update_layer_and_restart
+            self.worker_consumer.on.temporal_worker_consumer_available,
+            self._update_layer_and_restart,
         )
 
     def _update_layer_and_restart(self, event):
@@ -197,8 +206,8 @@ class MsmOperatorCharm(ops.CharmBase):
         except S3IntegrationNotReadyError:
             self.unit.status = ops.WaitingStatus("Waiting for s3 integration")
             return
-        except TemporalRelationNotReadyError:
-            self.unit.status = ops.WaitingStatus("Waiting for worker-consumer relation")
+        except TemporalRelationNotReadyError as ex:
+            self.unit.status = ops.WaitingStatus(f"Waiting for {ex.relation_name} relation")
             return
 
         # Handle Loki push API endpoints
@@ -468,13 +477,15 @@ class MsmOperatorCharm(ops.CharmBase):
         self.container.exec(["update-ca-certificates", "--fresh"]).wait()
 
     def _fetch_temporal_relation_data(self) -> dict:
-        if relation := self.model.get_relation("worker-consumer"):
-            return {
-                "host": relation.data[relation.app]["host"],
-                "namespace": relation.data[relation.app]["namespace"],
-                "queue": relation.data[relation.app]["queue"],
-            }
-        raise TemporalRelationNotReadyError()
+        if not (self.host_info.host and self.host_info.port):
+            raise TemporalRelationNotReadyError("temporal-host-info")
+        elif not (self.worker_consumer.namespace and self.worker_consumer.queue):
+            raise TemporalRelationNotReadyError("temporal-worker-consumer")
+        return {
+            "host": f"{self.host_info.host}:{self.host_info.port}",
+            "namespace": self.worker_consumer.namespace,
+            "queue": self.worker_consumer.queue,
+        }
 
     def _create_msm_user(
         self, username: str, password: str, email: str, fullname: str | None = None
