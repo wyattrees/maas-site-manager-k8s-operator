@@ -87,6 +87,9 @@ requires:
     temporal-worker-consumer:
         interface: temporal-worker-consumer
         limit: 1
+    temporal-host-info:
+        interface: temporal-host-info
+        limit: 1
 provides:
     metrics-endpoint:
         interface: prometheus_scrape
