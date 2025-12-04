@@ -176,6 +176,12 @@ class MsmOperatorCharm(ops.CharmBase):
             self.worker_consumer.on.temporal_worker_consumer_available,
             self._update_layer_and_restart,
         )
+        self.framework.observe(
+            self.on.temporal_host_info_relation_broken, self._update_layer_and_restart
+        )
+        self.framework.observe(
+            self.on.temporal_worker_consumer_relation_broken, self._update_layer_and_restart
+        )
 
     def _update_layer_and_restart(self, event):
         """Handle changed configuration."""
